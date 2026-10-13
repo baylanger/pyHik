@@ -98,6 +98,7 @@ with ISAPIClient('X.X.X.X', port=80, username='admin', password='1234') as clien
 * `get_rtsp_url(channel=1, stream_type=1, include_credentials=True)` - build an RTSP stream URL
 * `reboot()` - reboot the device
 * `custom_request(...)` - issue an arbitrary ISAPI request for endpoints not otherwise wrapped
+* `request_raw(method, endpoint, body=None)` - like `custom_request`, but sends the body exactly as given and returns a `RawResponse` (status code and unparsed bytes) without raising on HTTP error statuses; for devices that reject re-serialized XML or when the error body matters
 
 # TODO
 

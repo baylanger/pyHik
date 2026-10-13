@@ -9,6 +9,8 @@ import threading
 import time
 import unittest
 import xml.etree.ElementTree as ET
+import asyncio
+import pytest
 
 from unittest.mock import call, MagicMock, patch, PropertyMock
 from requests.auth import HTTPDigestAuth
@@ -16,6 +18,35 @@ from pyhik.hikvision import HikCamera, inject_events_into_camera
 from pyhik.constants import (
     CONNECT_TIMEOUT, DOWNLOAD_TIMEOUT, NVR_DEVICE, VALID_NOTIFICATION_METHODS
 )
+from test.common import (
+    DEFAULT_HOST,
+    DEFAULT_USERNAME,
+    DEFAULT_PASSWORD,
+    DEFAULT_HTTP_PORT,
+    DEFAULT_HTTPS_PORT,
+)
+
+ACTIVE_CAMERAS = []
+# Patch HikCamera init during tests to track instances automatically
+from pyhik.hikvision import HikCamera
+_original_init = HikCamera.__init__
+
+def _patched_init(self, *args, **kwargs):
+    _original_init(self, *args, **kwargs)
+    ACTIVE_CAMERAS.append(self)
+
+HikCamera.__init__ = _patched_init
+
+@pytest.fixture(autouse=True)
+def cleanup_cameras():
+    """Ensure every camera instantiated in a test is disconnected afterward."""
+    yield
+    while ACTIVE_CAMERAS:
+        cam = ACTIVE_CAMERAS.pop()
+        try:
+            cam.disconnect()
+        except Exception:
+            pass
 
 if not hasattr(unittest.TestCase, "assertNoLogs"):
     # unittest grew assertNoLogs in 3.10; the library still supports 3.9.
@@ -298,39 +329,39 @@ class URLParsingTestCase(unittest.TestCase):
     @patch("pyhik.hikvision.HikCamera.initialize")
     def test_plain_host(self, mock_init, mock_session):
         """Test host as plain IP address."""
-        camera = HikCamera(host="192.168.1.100", port=80)
-        self.assertEqual(camera.host, "192.168.1.100")
-        self.assertEqual(camera.root_url, "http://192.168.1.100:80")
+        camera = HikCamera(host=DEFAULT_HOST, port=DEFAULT_HTTP_PORT)
+        self.assertEqual(camera.host, DEFAULT_HOST)
+        self.assertEqual(camera.root_url, f"http://{DEFAULT_HOST}:{DEFAULT_HTTP_PORT}")
 
     @patch("pyhik.hikvision.requests.Session")
     @patch("pyhik.hikvision.HikCamera.initialize")
     def test_host_with_scheme(self, mock_init, mock_session):
         """Test host as URL with http scheme."""
-        camera = HikCamera(host="http://192.168.1.100", port=80)
-        self.assertEqual(camera.host, "192.168.1.100")
-        self.assertEqual(camera.root_url, "http://192.168.1.100:80")
+        camera = HikCamera(host=f"http://{DEFAULT_HOST}", port=DEFAULT_HTTP_PORT)
+        self.assertEqual(camera.host, DEFAULT_HOST)
+        self.assertEqual(camera.root_url, f"http://{DEFAULT_HOST}:{DEFAULT_HTTP_PORT}")
 
     @patch("pyhik.hikvision.requests.Session")
     @patch("pyhik.hikvision.HikCamera.initialize")
     def test_host_with_scheme_and_port(self, mock_init, mock_session):
         """Test host as URL with scheme and port - port in URL takes precedence."""
-        camera = HikCamera(host="http://192.168.1.100:8080", port=80)
-        self.assertEqual(camera.host, "192.168.1.100")
-        self.assertEqual(camera.root_url, "http://192.168.1.100:8080")
+        camera = HikCamera(host=f"http://{DEFAULT_HOST}:8080", port=DEFAULT_HTTP_PORT)
+        self.assertEqual(camera.host, DEFAULT_HOST)
+        self.assertEqual(camera.root_url, f"http://{DEFAULT_HOST}:8080")
 
     @patch("pyhik.hikvision.requests.Session")
     @patch("pyhik.hikvision.HikCamera.initialize")
     def test_host_with_https(self, mock_init, mock_session):
         """Test host with https scheme."""
-        camera = HikCamera(host="https://192.168.1.100", port=443)
-        self.assertEqual(camera.host, "192.168.1.100")
-        self.assertEqual(camera.root_url, "https://192.168.1.100:443")
+        camera = HikCamera(host=f"https://{DEFAULT_HOST}", port=DEFAULT_HTTPS_PORT)
+        self.assertEqual(camera.host, DEFAULT_HOST)
+        self.assertEqual(camera.root_url, f"https://{DEFAULT_HOST}:{DEFAULT_HTTPS_PORT}")
 
     @patch("pyhik.hikvision.requests.Session")
     @patch("pyhik.hikvision.HikCamera.initialize")
     def test_hostname(self, mock_init, mock_session):
         """Test with hostname instead of IP."""
-        camera = HikCamera(host="camera.local", port=80)
+        camera = HikCamera(host="camera.local", port=DEFAULT_HTTP_PORT)
         self.assertEqual(camera.host, "camera.local")
         self.assertEqual(camera.root_url, "http://camera.local:80")
 
@@ -582,17 +613,17 @@ class ThreadSafetyTestCase(unittest.TestCase):
         api_session.close.assert_not_called()
 
 
-ALERT_XML = """<EventNotificationAlert \
+ALERT_XML = f"""<EventNotificationAlert \
 xmlns="http://www.hikvision.com/ver20/XMLSchema" version="2.0">
-<ipAddress>192.168.1.100</ipAddress>
+<ipAddress>{DEFAULT_HOST}</ipAddress>
 <protocolType>HTTP</protocolType>
 <channelID>1</channelID>
 <dateTime>2026-06-08T12:00:00+00:00</dateTime>
 <activePostCount>1</activePostCount>
-<eventType>{etype}</eventType>
+<eventType>{{etype}}</eventType>
 <eventState>active</eventState>
 <eventDescription>Motion alarm</eventDescription>
-{extra}
+{{extra}}
 </EventNotificationAlert>"""
 
 
@@ -798,49 +829,57 @@ class UpdateCallbackTestCase(unittest.TestCase):
         self.assertEqual(seen, ['sensor'])
 
 class StreamReliabilityTestCase(unittest.TestCase):
+    def tearDown(self):
+        # Clean up any camera instance stored on the test case during execution
+        if hasattr(self, 'camera') and self.camera:
+            try:
+                self.camera.disconnect()
+            except Exception:
+                pass
+
     def test_read_timeout_does_not_kill_the_thread(self):
         """A read timeout is how a silently dropped connection surfaces. If it
         escapes the loop the thread dies and events stop for good."""
-        camera = make_camera()
-        camera.hik_request_stream = MagicMock()
-        camera.hik_request_stream.get.side_effect = \
+        self.camera = make_camera()
+        self.camera.hik_request_stream = MagicMock()
+        self.camera.hik_request_stream.get.side_effect = \
             requests.exceptions.ReadTimeout("read timed out")
 
-        camera.alert_stream(threading.Event(), killed_after(1))
+        self.camera.alert_stream(threading.Event(), killed_after(1))
 
-        self.assertEqual(camera.hik_request_stream.get.call_count, 2)
+        self.assertEqual(self.camera.hik_request_stream.get.call_count, 2)
 
     def test_alternate_stream_url_has_a_timeout(self):
         """Without a timeout the fallback request can block the thread
         forever on a device that accepts the connection and never answers."""
-        camera = make_camera()
-        camera.hik_request_stream = MagicMock()
-        camera.hik_request_stream.get.return_value = MagicMock(
+        self.camera = make_camera()
+        self.camera.hik_request_stream = MagicMock()
+        self.camera.hik_request_stream.get.return_value = MagicMock(
             status_code=requests.codes.not_found)
 
-        camera.alert_stream(threading.Event(), killed_after(0))
+        self.camera.alert_stream(threading.Event(), killed_after(0))
 
-        alternate_call = camera.hik_request_stream.get.call_args_list[1]
+        alternate_call = self.camera.hik_request_stream.get.call_args_list[1]
         self.assertIn("timeout", alternate_call.kwargs)
 
     def test_disconnect_does_not_wait_out_the_backoff(self):
         """disconnect() joins this thread with no timeout, so a backoff that
         ignores the kill event is a wait its caller cannot escape. A host
         shutting down while the camera is unreachable would block on it."""
-        camera = make_camera()
-        camera.hik_request_stream = MagicMock()
+        self.camera = make_camera()
+        self.camera.hik_request_stream = MagicMock()
         failing = threading.Event()
 
         def unreachable(*args, **kwargs):
             failing.set()
             raise requests.exceptions.ConnectionError("no route to host")
 
-        camera.hik_request_stream.get.side_effect = unreachable
+        self.camera.hik_request_stream.get.side_effect = unreachable
 
-        camera.start_stream()
+        self.camera.start_stream()
         self.assertTrue(failing.wait(5))
         started = time.monotonic()
-        camera.disconnect()
+        self.camera.disconnect()
 
         # The backoff it was sitting in is 5s, and grows with every failure.
         self.assertLess(time.monotonic() - started, 4)
@@ -848,14 +887,14 @@ class StreamReliabilityTestCase(unittest.TestCase):
     def test_a_killed_stream_does_not_reconnect(self):
         """The kill event can arrive while the thread is between attempts.
         Reconnecting then leaves a thread nobody is going to join again."""
-        camera = make_camera()
-        camera.hik_request_stream = MagicMock()
+        self.camera = make_camera()
+        self.camera.hik_request_stream = MagicMock()
         kill_event = threading.Event()
         kill_event.set()
 
-        camera.alert_stream(threading.Event(), kill_event)
+        self.camera.alert_stream(threading.Event(), kill_event)
 
-        camera.hik_request_stream.get.assert_not_called()
+        self.camera.hik_request_stream.get.assert_not_called()
 
 
 class StreamConnectedTestCase(unittest.TestCase):

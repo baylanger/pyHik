@@ -24,8 +24,16 @@ from pyhik.isapi import (
     InputPort,
     EventState,
     DeviceCapabilities,
+    RawResponse,
 )
 
+from test.common import (
+    DEFAULT_HOST,
+    DEFAULT_USERNAME,
+    DEFAULT_PASSWORD,
+    DEFAULT_HTTP_PORT,
+    DEFAULT_HTTPS_PORT,
+)
 
 # Sample XML responses
 DEVICE_INFO_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -85,92 +93,93 @@ class TestISAPIClientBasics(unittest.TestCase):
 
     def test_init_defaults(self):
         """Test client initialization with defaults."""
-        client = ISAPIClient(host="192.168.1.100")
-        self.assertEqual(client.host, "192.168.1.100")
+        client = ISAPIClient(host=DEFAULT_HOST)
+        self.assertEqual(client.host, DEFAULT_HOST)
         self.assertEqual(client.port, 80)
-        self.assertEqual(client.base_url, "http://192.168.1.100:80")
+        self.assertEqual(client.base_url, f"http://{DEFAULT_HOST}:{DEFAULT_HTTP_PORT}")
         self.assertFalse(client.ssl)
         self.assertEqual(client.rtsp_port, 554)
 
     def test_init_ssl(self):
         """Test client initialization with SSL."""
-        client = ISAPIClient(host="192.168.1.100", port=443, ssl=True)
-        self.assertEqual(client.base_url, "https://192.168.1.100:443")
+        client = ISAPIClient(host=DEFAULT_HOST, port=DEFAULT_HTTPS_PORT, ssl=True)
+        self.assertEqual(client.base_url, f"https://{DEFAULT_HOST}:{DEFAULT_HTTPS_PORT}")
 
     def test_get_rtsp_url(self):
         """Test RTSP URL generation."""
         client = ISAPIClient(
-            host="192.168.1.100",
-            username="admin",
-            password="pass123",
+            host=DEFAULT_HOST,
+            username=DEFAULT_USERNAME,
+            password=DEFAULT_PASSWORD,
         )
         url = client.get_rtsp_url(channel=1, stream_type=1)
+
         self.assertEqual(
             url,
-            "rtsp://admin:pass123@192.168.1.100:554/Streaming/Channels/101"
+            f"rtsp://{DEFAULT_USERNAME}:{DEFAULT_PASSWORD}@{DEFAULT_HOST}:554/Streaming/Channels/101"
         )
 
     def test_get_rtsp_url_substream(self):
         """Test RTSP URL generation for substream."""
         client = ISAPIClient(
-            host="192.168.1.100",
-            username="admin",
-            password="pass123",
+            host=DEFAULT_HOST,
+            username=DEFAULT_USERNAME,
+            password=DEFAULT_PASSWORD,
         )
         url = client.get_rtsp_url(channel=2, stream_type=2)
         self.assertEqual(
             url,
-            "rtsp://admin:pass123@192.168.1.100:554/Streaming/Channels/202"
+            f"rtsp://{DEFAULT_USERNAME}:{DEFAULT_PASSWORD}@{DEFAULT_HOST}:554/Streaming/Channels/202"
         )
 
     def test_get_rtsp_url_without_credentials(self):
         """Test RTSP URL generation without credentials."""
         client = ISAPIClient(
-            host="192.168.1.100",
-            username="admin",
-            password="pass123",
+            host=DEFAULT_HOST,
+            username=DEFAULT_USERNAME,
+            password=DEFAULT_PASSWORD,
         )
         url = client.get_rtsp_url(channel=1, include_credentials=False)
         self.assertEqual(
             url,
-            "rtsp://192.168.1.100:554/Streaming/Channels/101"
+            f"rtsp://{DEFAULT_HOST}:554/Streaming/Channels/101"
         )
 
     def test_host_with_scheme(self):
         """Test that host with http:// scheme is parsed correctly."""
-        client = ISAPIClient(host="http://192.168.1.100", port=80)
-        self.assertEqual(client.host, "192.168.1.100")
-        self.assertEqual(client.port, 80)
-        self.assertEqual(client.base_url, "http://192.168.1.100:80")
+        client = ISAPIClient(host=f"http://{DEFAULT_HOST}", port=DEFAULT_HTTP_PORT)
+        self.assertEqual(client.host, DEFAULT_HOST)
+        self.assertEqual(client.port, DEFAULT_HTTP_PORT)
+        self.assertEqual(client.base_url, f"http://{DEFAULT_HOST}:{DEFAULT_HTTP_PORT}")
 
     def test_host_with_scheme_and_port(self):
         """Test that host with scheme and port extracts port from URL."""
-        client = ISAPIClient(host="http://192.168.1.100:8080", port=80)
-        self.assertEqual(client.host, "192.168.1.100")
+        client = ISAPIClient(host=f"http://{DEFAULT_HOST}:8080", port=DEFAULT_HTTP_PORT)
+        self.assertEqual(client.host, DEFAULT_HOST)
         self.assertEqual(client.port, 8080)
-        self.assertEqual(client.base_url, "http://192.168.1.100:8080")
+        self.assertEqual(client.base_url, f"http://{DEFAULT_HOST}:8080")
 
     def test_host_with_https_scheme(self):
         """Test that host with https:// scheme is parsed correctly."""
-        client = ISAPIClient(host="https://192.168.1.100", port=443, ssl=True)
-        self.assertEqual(client.host, "192.168.1.100")
-        self.assertEqual(client.base_url, "https://192.168.1.100:443")
+        client = ISAPIClient(host=f"https://{DEFAULT_HOST}", port=DEFAULT_HTTPS_PORT, ssl=True)
+        self.assertEqual(client.host, DEFAULT_HOST)
+        self.assertEqual(client.base_url, f"https://{DEFAULT_HOST}:{DEFAULT_HTTPS_PORT}")
 
     def test_rtsp_url_special_chars_in_password(self):
         """Test that RTSP URL encodes special characters in credentials."""
         client = ISAPIClient(
-            host="192.168.1.100",
-            username="admin",
+            host=DEFAULT_HOST,
+            username=DEFAULT_USERNAME,
             password="p@ss:word/123",
         )
         url = client.get_rtsp_url(channel=1, stream_type=1)
-        self.assertIn("admin", url)
+        self.assertIn(DEFAULT_USERNAME, url)
         self.assertIn("p%40ss%3Aword%2F123", url)
         self.assertNotIn("p@ss:word/123", url)
 
     def test_context_manager(self):
         """Test context manager usage."""
-        with ISAPIClient(host="192.168.1.100") as client:
+        with ISAPIClient(host=DEFAULT_HOST) as client:
             self.assertIsNotNone(client)
 
 
@@ -189,8 +198,8 @@ class TestISAPIClientRequests(unittest.TestCase):
         session.get.return_value = response
 
         client = ISAPIClient(
-            host="192.168.1.100",
-            username="admin",
+            host=DEFAULT_HOST,
+            username=DEFAULT_USERNAME,
             password="password",
         )
         client.get_device_info()
@@ -203,7 +212,7 @@ class TestISAPIClientRequests(unittest.TestCase):
         session = mock_session_class.return_value
         session.get.side_effect = requests.exceptions.ConnectionError("Failed")
 
-        client = ISAPIClient(host="192.168.1.100")
+        client = ISAPIClient(host=DEFAULT_HOST)
         with self.assertRaises(ISAPIConnectionError):
             client.get_device_info()
 
@@ -212,7 +221,7 @@ class TestISAPIClientRequests(unittest.TestCase):
         session = mock_session_class.return_value
         session.get.side_effect = requests.exceptions.Timeout("Timeout")
 
-        client = ISAPIClient(host="192.168.1.100")
+        client = ISAPIClient(host=DEFAULT_HOST)
         with self.assertRaises(ISAPIConnectionError):
             client.get_device_info()
 
@@ -223,7 +232,7 @@ class TestISAPIClientRequests(unittest.TestCase):
         response.status_code = 401
         session.get.return_value = response
 
-        client = ISAPIClient(host="192.168.1.100")
+        client = ISAPIClient(host=DEFAULT_HOST)
         client._auth = MagicMock()  # Skip auth detection
         with self.assertRaises(ISAPIAuthError):
             client.get_device_info()
@@ -235,7 +244,7 @@ class TestISAPIClientRequests(unittest.TestCase):
         response.status_code = 404
         session.get.return_value = response
 
-        client = ISAPIClient(host="192.168.1.100")
+        client = ISAPIClient(host=DEFAULT_HOST)
         client._auth = MagicMock()
         with self.assertRaises(ISAPINotFoundError):
             client.request(HTTPMethod.GET, "/ISAPI/nonexistent")
@@ -270,7 +279,7 @@ class TestISAPIClientMethods(unittest.TestCase):
             }
         }
 
-        client = ISAPIClient(host="192.168.1.100")
+        client = ISAPIClient(host=DEFAULT_HOST)
         info = client.get_device_info()
 
         self.assertEqual(info.get("deviceName"), "Test Camera")
@@ -294,7 +303,7 @@ class TestISAPIClientMethods(unittest.TestCase):
             }
         }
 
-        client = ISAPIClient(host="192.168.1.100")
+        client = ISAPIClient(host=DEFAULT_HOST)
         client._auth = MagicMock()
         streams = client.get_streaming_channels()
 
@@ -317,7 +326,7 @@ class TestISAPIClientMethods(unittest.TestCase):
             }
         }
 
-        client = ISAPIClient(host="192.168.1.100")
+        client = ISAPIClient(host=DEFAULT_HOST)
         client._auth = MagicMock()
         cameras = client.get_cameras()
 
@@ -340,7 +349,7 @@ class TestISAPIClientMethods(unittest.TestCase):
             }
         }
 
-        client = ISAPIClient(host="192.168.1.100")
+        client = ISAPIClient(host=DEFAULT_HOST)
         client._auth = MagicMock()
         ports = client.get_output_ports()
 
@@ -366,7 +375,7 @@ class TestISAPIClientMethods(unittest.TestCase):
             }
         }
 
-        client = ISAPIClient(host="192.168.1.100")
+        client = ISAPIClient(host=DEFAULT_HOST)
         client._auth = MagicMock()
         devices = client.get_storage_devices()
 
@@ -386,11 +395,91 @@ class TestISAPIClientMethods(unittest.TestCase):
         response.headers = {"content-type": "image/jpeg"}
         session.get.return_value = response
 
-        client = ISAPIClient(host="192.168.1.100")
+        client = ISAPIClient(host=DEFAULT_HOST)
         client._auth = MagicMock()
         snapshot = client.get_snapshot(channel=1)
 
         self.assertEqual(snapshot, b"\xff\xd8\xff\xe0")
+
+
+class TestISAPIClientRawRequest(unittest.TestCase):
+    """Tests for ISAPIClient.request_raw."""
+
+    def setUp(self):
+        self.client = ISAPIClient(host=DEFAULT_HOST, username=DEFAULT_USERNAME, password="pw")
+        # Skip auth detection; it is covered elsewhere.
+        self.client._auth = MagicMock()
+        self.client._session = MagicMock()
+
+    @staticmethod
+    def _response(status=200, content=b"<ok/>", headers=None):
+        resp = MagicMock()
+        resp.status_code = status
+        resp.content = content
+        resp.headers = headers or {"Content-Type": "application/xml"}
+        return resp
+
+    def test_get_returns_unparsed_response(self):
+        self.client._session.request.return_value = self._response(
+            content=b"<A xmlns=\"x\"><B xmlns=\"x\">1</B></A>"
+        )
+        result = self.client.request_raw("GET", "/ISAPI/Image/channels/1")
+        self.assertIsInstance(result, RawResponse)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.content, b"<A xmlns=\"x\"><B xmlns=\"x\">1</B></A>")
+        args, kwargs = self.client._session.request.call_args
+        self.assertEqual( args, ("GET", f"http://{DEFAULT_HOST}:{DEFAULT_HTTP_PORT}/ISAPI/Image/channels/1"))
+        self.assertIsNone(kwargs["data"])
+        self.assertIsNone(kwargs["headers"])
+
+    def test_put_sends_body_unchanged(self):
+        body = "<A xmlns=\"x\"><B xmlns=\"x\">1</B></A>"
+        self.client._session.request.return_value = self._response()
+        self.client.request_raw("put", "/ISAPI/Image/channels/1", body)
+        args, kwargs = self.client._session.request.call_args
+        self.assertEqual(args[0], "PUT")
+        self.assertEqual(kwargs["data"], body.encode("utf-8"))
+        self.assertEqual(kwargs["headers"], {"Content-Type": "application/xml"})
+
+    def test_bytes_body_passed_through(self):
+        self.client._session.request.return_value = self._response()
+        self.client.request_raw("PUT", "/x", b"<A/>")
+        self.assertEqual(self.client._session.request.call_args[1]["data"], b"<A/>")
+
+    def test_error_status_is_returned_not_raised(self):
+        for status in (400, 401, 403, 404, 500):
+            with self.subTest(status=status):
+                self.client._session.request.return_value = self._response(
+                    status=status, content=b"<ResponseStatus/>"
+                )
+                result = self.client.request_raw("PUT", "/x", "<A/>")
+                self.assertFalse(result.ok)
+                self.assertEqual(result.status_code, status)
+                self.assertEqual(result.text, "<ResponseStatus/>")
+
+    def test_connection_errors_raise(self):
+        for exc in (
+            requests.exceptions.ConnectionError(),
+            requests.exceptions.Timeout(),
+            requests.exceptions.RequestException(),
+        ):
+            with self.subTest(exc=type(exc).__name__):
+                self.client._session.request.side_effect = exc
+                with self.assertRaises(ISAPIConnectionError):
+                    self.client.request_raw("GET", "/x")
+
+    def test_invalid_method_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            self.client.request_raw("FETCH", "/x")
+
+    def test_text_replaces_undecodable_bytes(self):
+        self.client._session.request.return_value = self._response(content=b"\xff<a/>")
+        self.assertIn("<a/>", self.client.request_raw("GET", "/x").text)
+
+    def test_params_forwarded(self):
+        self.client._session.request.return_value = self._response()
+        self.client.request_raw("GET", "/x", params={"a": 1})
+        self.assertEqual(self.client._session.request.call_args[1]["params"], {"a": 1})
 
 
 class TestDataClasses(unittest.TestCase):
