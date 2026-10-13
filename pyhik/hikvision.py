@@ -600,7 +600,7 @@ class HikCamera(object):
         try:
             tree = ET.fromstring(response.text)
             self.fetch_namespace(tree, CONTEXT_INFO)
- 
+
             for item in tree:
                 tag = item.tag.split('}')[1]
                 device_info[tag] = item.text
@@ -743,12 +743,26 @@ class HikCamera(object):
         self.reset_thrd.set()
 
     def disconnect(self):
-        """Disconnect from event stream."""
-        _LOGGING.debug('Disconnecting from stream: %s', self.name)
-        self.kill_thrd.set()
-        self.thrd.join()
-        _LOGGING.debug('Event stream thread for %s is stopped', self.name)
-        self.kill_thrd.clear()
+        """Close the event stream session and stop the processing thread."""
+        self._is_running = False
+
+        # 1. Wake up the background thread immediately from its backoff sleep
+        if hasattr(self, "_kill_event") and self._kill_event:
+            self._kill_event.set()
+
+        # 2. Join the background thread
+        if hasattr(self, "_thread") and self._thread and self._thread.is_alive():
+            try:
+                self._thread.join(timeout=2.0)
+            except Exception:
+                pass
+
+        # 3. Close the session
+        if hasattr(self, "_session") and self._session:
+            try:
+                self._session.close()
+            except Exception:
+                pass
 
     def start_stream(self):
         """Start thread to process event stream."""
@@ -758,6 +772,13 @@ class HikCamera(object):
     def alert_stream(self, reset_event, kill_event):
         """Open event stream."""
         _LOGGING.debug('Stream Thread Started: %s, %s', self.name, self.cam_id)
+
+        if kill_event is None:
+            kill_event = threading.Event()
+
+        # Store it so disconnect() can access it!
+        self._kill_event = kill_event
+
         start_event = False
         parse_string = ""
         fail_count = 0

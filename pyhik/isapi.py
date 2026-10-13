@@ -15,7 +15,15 @@ from typing import Any, Dict, List, Optional, Union
 from urllib.parse import quote, urlparse, urlunparse
 
 import requests
+import xml.etree.ElementTree as ET
+
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
+
+from pyhik.image import (
+    ImageSetting,
+    parse_image_capabilities,
+    parse_image_values,
+)
 
 try:
     import xmltodict
@@ -37,6 +45,7 @@ ENDPOINT_HOLIDAYS = "/ISAPI/System/Holidays"
 ENDPOINT_REBOOT = "/ISAPI/System/reboot"
 ENDPOINT_EVENT_TRIGGERS = "/ISAPI/Event/triggers"
 ENDPOINT_SMART_CAPABILITIES = "/ISAPI/Smart/capabilities"
+ENDPOINT_IMAGE_CHANNEL = "/ISAPI/Image/channels/{channel}"
 
 # Event detection endpoints
 EVENT_ENDPOINTS: Dict[str, str] = {
@@ -163,6 +172,31 @@ class DeviceCapabilities:
     support_storage: bool = False
     num_io_outputs: int = 0
     num_io_inputs: int = 0
+
+
+@dataclass
+class RawResponse:
+    """Unparsed response from :meth:`ISAPIClient.request_raw`.
+
+    Unlike :meth:`ISAPIClient.request`, nothing is parsed and HTTP error
+    statuses are not turned into exceptions, so the caller sees the exact
+    bytes the device sent (including the ``ResponseStatus`` body that
+    accompanies most ISAPI errors).
+    """
+
+    status_code: int
+    content: bytes
+    headers: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        """Return True for a 2xx status."""
+        return 200 <= self.status_code < 300
+
+    @property
+    def text(self) -> str:
+        """Return the body decoded as UTF-8 (undecodable bytes replaced)."""
+        return self.content.decode("utf-8", errors="replace")
 
 
 class ISAPIClient:
@@ -815,6 +849,68 @@ class ISAPIClient:
         """Reboot the device."""
         self.request(HTTPMethod.PUT, ENDPOINT_REBOOT)
 
+    def request_raw(
+        self,
+        method: str,
+        endpoint: str,
+        body: Optional[Union[str, bytes]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> RawResponse:
+        """Make an ISAPI request without parsing the request or the response.
+
+        Some devices only accept a PUT whose XML is byte-for-byte what they
+        sent, apart from the edited values (for example, repeated ``xmlns``
+        declarations on child elements must be preserved). Converting the
+        document to a dictionary and back, as :meth:`request` does, loses
+        that. This method sends ``body`` exactly as given and returns the
+        response exactly as received.
+
+        HTTP error statuses (including 401, 403 and 404) are returned in the
+        :class:`RawResponse` rather than raised, because the response body
+        usually carries the device's ``subStatusCode``. Only transport
+        failures raise.
+
+        Args:
+            method: HTTP method (GET, PUT, POST, DELETE).
+            endpoint: ISAPI endpoint path.
+            body: Optional request body, sent as ``application/xml``. A
+                ``str`` is encoded as UTF-8.
+            params: Optional query parameters.
+
+        Returns:
+            The unparsed response.
+
+        Raises:
+            ISAPIConnectionError: Connection failed or timed out.
+        """
+        self._detect_auth_method()
+
+        data = body.encode("utf-8") if isinstance(body, str) else body
+        headers = {"Content-Type": "application/xml"} if data is not None else None
+
+        try:
+            response = self._session.request(
+                HTTPMethod(method.upper()).value,
+                f"{self.base_url}{endpoint}",
+                auth=self._auth,
+                params=params,
+                data=data,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.exceptions.ConnectionError as err:
+            raise ISAPIConnectionError(f"Cannot connect to {self.host}") from err
+        except requests.exceptions.Timeout as err:
+            raise ISAPIConnectionError(f"Timeout connecting to {self.host}") from err
+        except requests.exceptions.RequestException as err:
+            raise ISAPIConnectionError(f"Request failed: {err}") from err
+
+        return RawResponse(
+            status_code=response.status_code,
+            content=response.content,
+            headers=dict(response.headers),
+        )
+
     def custom_request(
         self,
         method: str,
@@ -845,6 +941,61 @@ class ISAPIClient:
         if isinstance(result, bytes):
             return {"raw_bytes": True, "length": len(result)}
         return result
+
+    def _get_raw_ok(self, endpoint: str) -> bytes:
+        """GET an endpoint unparsed, raising the usual ISAPI errors on failure."""
+        response = self.request_raw("GET", endpoint)
+        if response.status_code == 401:
+            raise ISAPIAuthError("Invalid credentials")
+        if response.status_code == 403:
+            raise ISAPIAuthError("Insufficient permissions")
+        if response.status_code == 404:
+            raise ISAPINotFoundError(f"Endpoint not found: {endpoint}")
+        if not response.ok:
+            raise ISAPIError(f"Request failed with status {response.status_code}")
+        return response.content
+
+    def get_image_settings(self, channel: int = 1):
+        """Fetch image settings with fallback and error handling."""
+        caps_endpoint = f"/ISAPI/Image/channels/{channel}/capabilities"
+        values_endpoint = f"/ISAPI/Image/channels/{channel}"
+        
+        caps_res = self._get_raw_ok(caps_endpoint)
+        caps_content = caps_res.content if hasattr(caps_res, "content") else caps_res
+        
+        try:
+            values_res = self._get_raw_ok(values_endpoint)
+            values_content = values_res.content if hasattr(values_res, "content") else values_res
+        except (ISAPINotFoundError, ISAPIError):
+            values_content = None
+            
+        try:
+            return parse_image_capabilities(caps_content, values_content)
+        except ET.ParseError as err:
+            raise ISAPIError(f"Invalid XML received from camera: {err}") from err
+
+    def set_image_setting(self, channel: int, setting_path: str, value: str) -> RawResponse:
+        """Send a PUT request to update an image setting via ISAPI."""
+        endpoint = f"/ISAPI/Image/channels/{channel}"
+        
+        parts = setting_path.split('/')
+        tag_name = parts[-1]
+        payload = f"<ImageChannel><{tag_name}>{value}</{tag_name}></ImageChannel>"
+        
+        response = self.request_raw("PUT", endpoint, data=payload.encode('utf-8'))
+        
+        # Check if the server returned an error status code or response error code
+        if hasattr(response, "status_code") and response.status_code >= 400:
+            raise ISAPIError(f"Server rejected update with status {response.status_code}")
+            
+        return response
+
+    def get_image_values(self, channel: int = 1) -> Dict[str, str]:
+        content = self._get_raw_ok(ENDPOINT_IMAGE_CHANNEL.format(channel=channel))
+        try:
+            return parse_image_values(content)
+        except ET.ParseError as err:
+            raise ISAPIError(f"Invalid image settings XML: {err}") from err
 
     def close(self) -> None:
         """Close the client session."""

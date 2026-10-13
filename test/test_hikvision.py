@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 import xml.etree.ElementTree as ET
+import asyncio
 
 from unittest.mock import call, MagicMock, patch, PropertyMock
 from requests.auth import HTTPDigestAuth
@@ -16,6 +17,37 @@ from pyhik.hikvision import HikCamera, inject_events_into_camera
 from pyhik.constants import (
     CONNECT_TIMEOUT, DOWNLOAD_TIMEOUT, NVR_DEVICE, VALID_NOTIFICATION_METHODS
 )
+from test.common import (
+    DEFAULT_HOST,
+    DEFAULT_USERNAME,
+    DEFAULT_PASSWORD,
+    DEFAULT_HTTP_PORT,
+    DEFAULT_HTTPS_PORT,
+)
+
+ACTIVE_CAMERAS = []
+# Patch HikCamera init during tests to track instances automatically
+_original_init = HikCamera.__init__
+
+def _patched_init(self, *args, **kwargs):
+    _original_init(self, *args, **kwargs)
+    ACTIVE_CAMERAS.append(self)
+
+HikCamera.__init__ = _patched_init
+
+
+class HikvisionTestCaseBase(unittest.TestCase):
+    """Base test case ensuring every camera instantiated is disconnected after each test."""
+
+    def tearDown(self):
+        super().tearDown()
+        while ACTIVE_CAMERAS:
+            cam = ACTIVE_CAMERAS.pop()
+            try:
+                cam.disconnect()
+            except Exception:
+                pass
+
 
 if not hasattr(unittest.TestCase, "assertNoLogs"):
     # unittest grew assertNoLogs in 3.10; the library still supports 3.9.
@@ -61,7 +93,7 @@ XML = """<MotionDetection xmlns="http://www.hikvision.com/ver20/XMLSchema" versi
 
 
 @patch("pyhik.hikvision.requests.Session")
-class HikvisionTestCase(unittest.TestCase):
+class HikvisionTestCase(HikvisionTestCaseBase):
     @staticmethod
     def set_motion_detection_state(get, value):
         get.reset_mock()
@@ -176,7 +208,7 @@ EVENT_TRIGGERS_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </EventTriggerList>"""
 
 
-class GetEventTriggersTestCase(unittest.TestCase):
+class GetEventTriggersTestCase(HikvisionTestCaseBase):
     @patch("pyhik.hikvision.requests.Session")
     @patch("pyhik.hikvision.HikCamera.get_device_info")
     def test_default_notification_methods(self, mock_info, mock_session):
@@ -273,7 +305,6 @@ class GetEventTriggersTestCase(unittest.TestCase):
         self.assertIn("VMD", events)
         self.assertEqual(sorted(events["VMD"]), [1, 4, 5])
 
-
     @patch("pyhik.hikvision.requests.Session")
     @patch("pyhik.hikvision.HikCamera.get_device_info")
     def test_failed_fetch_logs_status_codes(self, mock_info, mock_session):
@@ -291,51 +322,52 @@ class GetEventTriggersTestCase(unittest.TestCase):
         self.assertIn("/ISAPI/Event/triggers -> 401", logs.output[0])
         self.assertIn("/Event/triggers -> 404", logs.output[0])
 
-class URLParsingTestCase(unittest.TestCase):
+
+class URLParsingTestCase(HikvisionTestCaseBase):
     """Test that URL parsing handles various host formats correctly."""
 
     @patch("pyhik.hikvision.requests.Session")
     @patch("pyhik.hikvision.HikCamera.initialize")
     def test_plain_host(self, mock_init, mock_session):
         """Test host as plain IP address."""
-        camera = HikCamera(host="192.168.1.100", port=80)
-        self.assertEqual(camera.host, "192.168.1.100")
-        self.assertEqual(camera.root_url, "http://192.168.1.100:80")
+        camera = HikCamera(host=DEFAULT_HOST, port=DEFAULT_HTTP_PORT)
+        self.assertEqual(camera.host, DEFAULT_HOST)
+        self.assertEqual(camera.root_url, f"http://{DEFAULT_HOST}:{DEFAULT_HTTP_PORT}")
 
     @patch("pyhik.hikvision.requests.Session")
     @patch("pyhik.hikvision.HikCamera.initialize")
     def test_host_with_scheme(self, mock_init, mock_session):
         """Test host as URL with http scheme."""
-        camera = HikCamera(host="http://192.168.1.100", port=80)
-        self.assertEqual(camera.host, "192.168.1.100")
-        self.assertEqual(camera.root_url, "http://192.168.1.100:80")
+        camera = HikCamera(host=f"http://{DEFAULT_HOST}", port=DEFAULT_HTTP_PORT)
+        self.assertEqual(camera.host, DEFAULT_HOST)
+        self.assertEqual(camera.root_url, f"http://{DEFAULT_HOST}:{DEFAULT_HTTP_PORT}")
 
     @patch("pyhik.hikvision.requests.Session")
     @patch("pyhik.hikvision.HikCamera.initialize")
     def test_host_with_scheme_and_port(self, mock_init, mock_session):
         """Test host as URL with scheme and port - port in URL takes precedence."""
-        camera = HikCamera(host="http://192.168.1.100:8080", port=80)
-        self.assertEqual(camera.host, "192.168.1.100")
-        self.assertEqual(camera.root_url, "http://192.168.1.100:8080")
+        camera = HikCamera(host=f"http://{DEFAULT_HOST}:8080", port=DEFAULT_HTTP_PORT)
+        self.assertEqual(camera.host, DEFAULT_HOST)
+        self.assertEqual(camera.root_url, f"http://{DEFAULT_HOST}:8080")
 
     @patch("pyhik.hikvision.requests.Session")
     @patch("pyhik.hikvision.HikCamera.initialize")
     def test_host_with_https(self, mock_init, mock_session):
         """Test host with https scheme."""
-        camera = HikCamera(host="https://192.168.1.100", port=443)
-        self.assertEqual(camera.host, "192.168.1.100")
-        self.assertEqual(camera.root_url, "https://192.168.1.100:443")
+        camera = HikCamera(host=f"https://{DEFAULT_HOST}", port=DEFAULT_HTTPS_PORT)
+        self.assertEqual(camera.host, DEFAULT_HOST)
+        self.assertEqual(camera.root_url, f"https://{DEFAULT_HOST}:{DEFAULT_HTTPS_PORT}")
 
     @patch("pyhik.hikvision.requests.Session")
     @patch("pyhik.hikvision.HikCamera.initialize")
     def test_hostname(self, mock_init, mock_session):
         """Test with hostname instead of IP."""
-        camera = HikCamera(host="camera.local", port=80)
+        camera = HikCamera(host="camera.local", port=DEFAULT_HTTP_PORT)
         self.assertEqual(camera.host, "camera.local")
         self.assertEqual(camera.root_url, "http://camera.local:80")
 
 
-class InjectEventsTestCase(unittest.TestCase):
+class InjectEventsTestCase(HikvisionTestCaseBase):
     def test_inject_events_adds_new_events(self):
         """Test that inject_events adds new events to camera event_states."""
         camera = MagicMock()
@@ -347,7 +379,6 @@ class InjectEventsTestCase(unittest.TestCase):
         }
 
         inject_events_into_camera(camera, events)
-
         camera.inject_events.assert_called_once_with(events)
 
     @patch("pyhik.hikvision.requests.Session")
@@ -406,7 +437,7 @@ class InjectEventsTestCase(unittest.TestCase):
         self.assertEqual(sorted(channels), [1, 2])
 
 
-class ThreadSafetyTestCase(unittest.TestCase):
+class ThreadSafetyTestCase(HikvisionTestCaseBase):
     """Tests for thread-safe session separation between API and stream."""
 
     @patch("pyhik.hikvision.HikCamera.get_device_info")
@@ -582,17 +613,17 @@ class ThreadSafetyTestCase(unittest.TestCase):
         api_session.close.assert_not_called()
 
 
-ALERT_XML = """<EventNotificationAlert \
+ALERT_XML = f"""<EventNotificationAlert \
 xmlns="http://www.hikvision.com/ver20/XMLSchema" version="2.0">
-<ipAddress>192.168.1.100</ipAddress>
+<ipAddress>{DEFAULT_HOST}</ipAddress>
 <protocolType>HTTP</protocolType>
 <channelID>1</channelID>
 <dateTime>2026-06-08T12:00:00+00:00</dateTime>
 <activePostCount>1</activePostCount>
-<eventType>{etype}</eventType>
+<eventType>{{etype}}</eventType>
 <eventState>active</eventState>
 <eventDescription>Motion alarm</eventDescription>
-{extra}
+{{extra}}
 </EventNotificationAlert>"""
 
 
@@ -604,8 +635,8 @@ def alert(etype="VMD", extra=""):
 def make_camera(triggers=None):
     """Build a HikCamera with a stubbed device and event trigger list."""
     with patch("pyhik.hikvision.requests.Session") as mock_session, \
-            patch("pyhik.hikvision.HikCamera.get_device_info") as mock_info, \
-            patch("pyhik.hikvision.HikCamera.get_event_triggers") as mock_triggers:
+         patch("pyhik.hikvision.HikCamera.get_device_info") as mock_info, \
+         patch("pyhik.hikvision.HikCamera.get_event_triggers") as mock_triggers:
         mock_info.return_value = {
             "deviceName": "Test", "deviceID": "12345678901"}
         mock_triggers.return_value = triggers if triggers is not None else {"VMD": [1]}
@@ -614,7 +645,7 @@ def make_camera(triggers=None):
         return HikCamera(host="localhost")
 
 
-class UnsupportedSensorTypeTestCase(unittest.TestCase):
+class UnsupportedSensorTypeTestCase(HikvisionTestCaseBase):
     """Devices report event types pyHik doesn't model; that is normal and
     must not log a warning on every startup or an error on every packet."""
 
@@ -638,13 +669,13 @@ class UnsupportedSensorTypeTestCase(unittest.TestCase):
         camera.process_stream(alert())
 
         self.assertTrue(camera.fetch_attributes("Motion", 1)[0])
-    
+
     def test_process_stream_handles_namespace_change(self):
         camera = make_camera()
-    
+
         # First alert establishes the Hikvision namespace.
         camera.process_stream(alert())
-    
+
         # Reset the event state so the second alert must be processed
         # successfully for the assertion below to pass.
         camera.process_stream(
@@ -656,7 +687,7 @@ class UnsupportedSensorTypeTestCase(unittest.TestCase):
             )
         )
         self.assertFalse(camera.fetch_attributes("Motion", 1)[0])
-    
+
         # Newer cameras may switch namespace within the same alert stream.
         tree = ET.fromstring(
             ALERT_XML.replace(
@@ -665,9 +696,9 @@ class UnsupportedSensorTypeTestCase(unittest.TestCase):
             ).format(etype="VMD", extra="")
         )
         camera.process_stream(tree)
-    
+
         self.assertTrue(camera.fetch_attributes("Motion", 1)[0])
-    
+
 # One trigger carrying several accepted notification methods, and a second
 # trigger repeating the same event type and channel.
 DUPLICATE_TRIGGERS_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -705,7 +736,7 @@ DUPLICATE_TRIGGERS_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </EventTriggerList>"""
 
 
-class DuplicateChannelsTestCase(unittest.TestCase):
+class DuplicateChannelsTestCase(HikvisionTestCaseBase):
     """Duplicate (event, channel) pairs made Home Assistant reject the whole
     platform with "does not generate unique IDs"."""
 
@@ -750,8 +781,7 @@ def killed_after(retries):
     return kill_event
 
 
-
-class UpdateCallbackTestCase(unittest.TestCase):
+class UpdateCallbackTestCase(HikvisionTestCaseBase):
     def test_removed_callback_stops_receiving_events(self):
         """A consumer that drops an object has to be able to drop its
         callback with it, or the next event calls into the dead one."""
@@ -797,50 +827,60 @@ class UpdateCallbackTestCase(unittest.TestCase):
 
         self.assertEqual(seen, ['sensor'])
 
-class StreamReliabilityTestCase(unittest.TestCase):
+
+class StreamReliabilityTestCase(HikvisionTestCaseBase):
+    def tearDown(self):
+        # Clean up any camera instance stored on the test case during execution
+        if hasattr(self, 'camera') and self.camera:
+            try:
+                self.camera.disconnect()
+            except Exception:
+                pass
+        super().tearDown()
+
     def test_read_timeout_does_not_kill_the_thread(self):
         """A read timeout is how a silently dropped connection surfaces. If it
         escapes the loop the thread dies and events stop for good."""
-        camera = make_camera()
-        camera.hik_request_stream = MagicMock()
-        camera.hik_request_stream.get.side_effect = \
+        self.camera = make_camera()
+        self.camera.hik_request_stream = MagicMock()
+        self.camera.hik_request_stream.get.side_effect = \
             requests.exceptions.ReadTimeout("read timed out")
 
-        camera.alert_stream(threading.Event(), killed_after(1))
+        self.camera.alert_stream(threading.Event(), killed_after(1))
 
-        self.assertEqual(camera.hik_request_stream.get.call_count, 2)
+        self.assertEqual(self.camera.hik_request_stream.get.call_count, 2)
 
     def test_alternate_stream_url_has_a_timeout(self):
         """Without a timeout the fallback request can block the thread
         forever on a device that accepts the connection and never answers."""
-        camera = make_camera()
-        camera.hik_request_stream = MagicMock()
-        camera.hik_request_stream.get.return_value = MagicMock(
+        self.camera = make_camera()
+        self.camera.hik_request_stream = MagicMock()
+        self.camera.hik_request_stream.get.return_value = MagicMock(
             status_code=requests.codes.not_found)
 
-        camera.alert_stream(threading.Event(), killed_after(0))
+        self.camera.alert_stream(threading.Event(), killed_after(0))
 
-        alternate_call = camera.hik_request_stream.get.call_args_list[1]
+        alternate_call = self.camera.hik_request_stream.get.call_args_list[1]
         self.assertIn("timeout", alternate_call.kwargs)
 
     def test_disconnect_does_not_wait_out_the_backoff(self):
         """disconnect() joins this thread with no timeout, so a backoff that
         ignores the kill event is a wait its caller cannot escape. A host
         shutting down while the camera is unreachable would block on it."""
-        camera = make_camera()
-        camera.hik_request_stream = MagicMock()
+        self.camera = make_camera()
+        self.camera.hik_request_stream = MagicMock()
         failing = threading.Event()
 
         def unreachable(*args, **kwargs):
             failing.set()
             raise requests.exceptions.ConnectionError("no route to host")
 
-        camera.hik_request_stream.get.side_effect = unreachable
+        self.camera.hik_request_stream.get.side_effect = unreachable
 
-        camera.start_stream()
+        self.camera.start_stream()
         self.assertTrue(failing.wait(5))
         started = time.monotonic()
-        camera.disconnect()
+        self.camera.disconnect()
 
         # The backoff it was sitting in is 5s, and grows with every failure.
         self.assertLess(time.monotonic() - started, 4)
@@ -848,17 +888,17 @@ class StreamReliabilityTestCase(unittest.TestCase):
     def test_a_killed_stream_does_not_reconnect(self):
         """The kill event can arrive while the thread is between attempts.
         Reconnecting then leaves a thread nobody is going to join again."""
-        camera = make_camera()
-        camera.hik_request_stream = MagicMock()
+        self.camera = make_camera()
+        self.camera.hik_request_stream = MagicMock()
         kill_event = threading.Event()
         kill_event.set()
 
-        camera.alert_stream(threading.Event(), kill_event)
+        self.camera.alert_stream(threading.Event(), kill_event)
 
-        camera.hik_request_stream.get.assert_not_called()
+        self.camera.hik_request_stream.get.assert_not_called()
 
 
-class StreamConnectedTestCase(unittest.TestCase):
+class StreamConnectedTestCase(HikvisionTestCaseBase):
     def test_state_changes_notify_every_callback_once(self):
         camera = make_camera({"VMD": [1], "tamperdetection": [1]})
         motion_callback = MagicMock()
@@ -880,9 +920,9 @@ class StreamConnectedTestCase(unittest.TestCase):
         camera._set_stream_connected(False)
         self.assertFalse(camera.stream_connected)
         self.assertEqual(motion_callback.call_count, 2)
-        
-        
-class DetectionTargetTestCase(unittest.TestCase):
+
+
+class DetectionTargetTestCase(HikvisionTestCaseBase):
     def test_top_level_target_type(self):
         camera = make_camera()
         camera.process_stream(
@@ -918,9 +958,9 @@ class DetectionTargetTestCase(unittest.TestCase):
         attributes = camera.fetch_attributes("Motion", 1)
         self.assertFalse(attributes[0])
         self.assertEqual(attributes[4], "human")
-        
-        
-class DownloadRecordingTestCase(unittest.TestCase):
+
+
+class DownloadRecordingTestCase(HikvisionTestCaseBase):
     """Tests for the download_recording method."""
 
     @patch("pyhik.hikvision.requests.Session")
@@ -1058,17 +1098,17 @@ class DownloadRecordingTestCase(unittest.TestCase):
         list(camera.download_recording("rtsp://test/uri", chunk_size=1024))
 
         mock_response.iter_content.assert_called_once_with(chunk_size=1024)
-        
-        
-class MotionDetectionUnsupportedTestCase(unittest.TestCase):
+
+
+class MotionDetectionUnsupportedTestCase(HikvisionTestCaseBase):
     """NVRs answer the motionDetection endpoint with 200 and a document that
     has no 'enabled' element. That is unsupported, not an error."""
 
     @staticmethod
     def _camera_answering(text):
         with patch("pyhik.hikvision.requests.Session") as mock_session, \
-                patch("pyhik.hikvision.HikCamera.get_device_info") as mock_info, \
-                patch("pyhik.hikvision.HikCamera.get_event_triggers") as mock_triggers:
+             patch("pyhik.hikvision.HikCamera.get_device_info") as mock_info, \
+             patch("pyhik.hikvision.HikCamera.get_event_triggers") as mock_triggers:
             mock_info.return_value = {
                 "deviceName": "Test", "deviceID": "12345678901"}
             mock_triggers.return_value = {"VMD": [1]}
@@ -1094,7 +1134,7 @@ class MotionDetectionUnsupportedTestCase(unittest.TestCase):
         self.assertIsNone(camera.current_motion_detection_state)
 
 
-class PartialAlertPacketTestCase(unittest.TestCase):
+class PartialAlertPacketTestCase(HikvisionTestCaseBase):
     """Devices leave optional fields out of alert packets. The event they do
     describe still has to reach the consumer."""
 
