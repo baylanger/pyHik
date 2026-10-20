@@ -12,10 +12,18 @@ from dataclasses import dataclass, field
 from enum import Enum
 import logging
 from typing import Any, Dict, List, Optional, Union
+import xml.etree.ElementTree as ET
 from urllib.parse import quote, urlparse, urlunparse
 
 import requests
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
+
+from pyhik.image import (
+    ImageSetting,
+    parse_image_capabilities,
+    parse_image_values,
+    parse_sub_status,
+)
 
 try:
     import xmltodict
@@ -37,6 +45,7 @@ ENDPOINT_HOLIDAYS = "/ISAPI/System/Holidays"
 ENDPOINT_REBOOT = "/ISAPI/System/reboot"
 ENDPOINT_EVENT_TRIGGERS = "/ISAPI/Event/triggers"
 ENDPOINT_SMART_CAPABILITIES = "/ISAPI/Smart/capabilities"
+ENDPOINT_IMAGE_CHANNEL = "/ISAPI/Image/channels/{channel}"
 
 # Event detection endpoints
 EVENT_ENDPOINTS: Dict[str, str] = {
@@ -65,7 +74,21 @@ class HTTPMethod(Enum):
 
 
 class ISAPIError(Exception):
-    """Base ISAPI error."""
+    """Base ISAPI error.
+
+    ``status_code`` and ``sub_status`` carry the HTTP status and the device's
+    ``subStatusCode`` (e.g. ``notSupport``) when the error came from a response.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        status_code: Optional[int] = None,
+        sub_status: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.sub_status = sub_status or None
 
 
 class ISAPIConnectionError(ISAPIError):
@@ -78,6 +101,15 @@ class ISAPIAuthError(ISAPIError):
 
 class ISAPINotFoundError(ISAPIError):
     """Resource not found error."""
+
+
+class ISAPINotSupportedError(ISAPINotFoundError):
+    """The device does not support the requested endpoint or feature.
+
+    Raised for a 404 or 501, or for any error response whose body says
+    ``notSupport``. Callers that only care about "not found" can keep catching
+    :class:`ISAPINotFoundError`.
+    """
 
 
 @dataclass
@@ -901,6 +933,67 @@ class ISAPIClient:
             content=response.content,
             headers=dict(response.headers),
         )
+
+    def _get_raw_ok(self, endpoint: str) -> bytes:
+        """GET an endpoint unparsed, raising a specific ISAPI error on failure.
+
+        Raises:
+            ISAPIAuthError: 401, or 403 that is not a "not supported" reply.
+            ISAPINotSupportedError: 404, 501, or a body saying ``notSupport``.
+            ISAPIError: Any other error status.
+        """
+        response = self.request_raw("GET", endpoint)
+        if response.ok:
+            return response.content
+
+        status = response.status_code
+        sub_status = parse_sub_status(response.content)
+        if status == 401:
+            raise ISAPIAuthError("Invalid credentials", status, sub_status)
+        if sub_status == "notSupport" or status in (404, 501):
+            raise ISAPINotSupportedError(
+                f"Not supported by the device: {endpoint}", status, sub_status
+            )
+        if status == 403:
+            raise ISAPIAuthError("Insufficient permissions", status, sub_status)
+        raise ISAPIError(f"Request failed with status {status}", status, sub_status)
+
+    def get_image_settings(self, channel: int = 1) -> List[ImageSetting]:
+        """Discover the image settings a channel supports, with current values.
+
+        Reads ``/ISAPI/Image/channels/<channel>/capabilities`` and
+        ``/ISAPI/Image/channels/<channel>``. If the device has no current
+        values endpoint (404), the defaults in the capabilities document are
+        used instead. See :mod:`pyhik.image`.
+
+        Raises:
+            ISAPIConnectionError: Connection failed.
+            ISAPIAuthError: Authentication failed or not permitted.
+            ISAPINotFoundError: The device has no image capabilities endpoint.
+            ISAPIError: Other request errors, or an unparsable response.
+        """
+        endpoint = ENDPOINT_IMAGE_CHANNEL.format(channel=channel)
+        capabilities = self._get_raw_ok(f"{endpoint}/capabilities")
+        try:
+            values: Optional[bytes] = self._get_raw_ok(endpoint)
+        except ISAPINotFoundError:
+            values = None
+        try:
+            return parse_image_capabilities(capabilities, values)
+        except ET.ParseError as err:
+            raise ISAPIError(f"Invalid image settings XML: {err}") from err
+
+    def get_image_values(self, channel: int = 1) -> Dict[str, str]:
+        """Read the current image setting values as ``{path: value}``.
+
+        Cheaper than :meth:`get_image_settings` for periodic polling: one
+        request, no capabilities.
+        """
+        content = self._get_raw_ok(ENDPOINT_IMAGE_CHANNEL.format(channel=channel))
+        try:
+            return parse_image_values(content)
+        except ET.ParseError as err:
+            raise ISAPIError(f"Invalid image settings XML: {err}") from err
 
     def custom_request(
         self,
