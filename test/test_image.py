@@ -111,6 +111,36 @@ class TestParseSubStatus(unittest.TestCase):
                 self.assertEqual(parse_sub_status(body), "")
 
 
+class TestParseEdgeCases(unittest.TestCase):
+    NS = 'xmlns="http://www.hikvision.com/ver20/XMLSchema"'
+
+    def test_repeated_elements_are_reported_once(self):
+        caps = (
+            "<ImageChannel %s><Region><level min=\"0\" max=\"10\">1</level></Region>"
+            "<Region><level min=\"0\" max=\"10\">2</level></Region></ImageChannel>" % self.NS
+        )
+        values = caps.replace(' min="0" max="10"', "")
+        settings = parse_image_capabilities(caps, values)
+        self.assertEqual([s.path for s in settings], ["Region/level"])
+        # The first occurrence, which is also the one a write changes.
+        self.assertEqual(settings[0].value, "1")
+        self.assertEqual(parse_image_values(values), {"Region/level": "1"})
+
+    def test_empty_options_are_dropped(self):
+        caps = '<ImageChannel %s><X><m opt="a,,b,">a</m><n opt=",">x</n></X></ImageChannel>' % self.NS
+        settings = parse_image_capabilities(caps)
+        self.assertEqual([(s.path, s.options) for s in settings], [("X/m", ["a", "b"])])
+
+    def test_first_of_several_off_capable_selects_is_linked(self):
+        caps = (
+            '<ImageChannel %s><F><enabled opt="true,false">true</enabled>'
+            '<FMode opt="CLOSE,AUTO">AUTO</FMode><other opt="close,x">x</other></F></ImageChannel>'
+            % self.NS
+        )
+        linked = {s.path: s.linked_enabled_path for s in parse_image_capabilities(caps)}
+        self.assertEqual(linked, {"F/FMode": "F/enabled", "F/other": None})
+
+
 class TestParseVariants(unittest.TestCase):
     def test_disabled_linked_select_reports_off_value(self):
         values = VALUES.replace(

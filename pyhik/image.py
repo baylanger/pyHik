@@ -12,7 +12,8 @@ flat list of :class:`ImageSetting` objects. It does no I/O and uses only the
 standard library.
 
 Settings are addressed by their slash-separated path, e.g.
-``Exposure/OverexposeSuppress/enabled``, with XML namespaces stripped.
+``Exposure/OverexposeSuppress/enabled``, with XML namespaces stripped. When an
+element is repeated, only its first occurrence is used.
 
 Derived in part from https://github.com/JoshADC/hikvision_isapi
 (MIT License), Copyright (c) JoshADC and contributors.
@@ -22,7 +23,7 @@ Licensed under the MIT license.
 from dataclasses import dataclass, field
 from enum import Enum
 import logging
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Set, Union
 import xml.etree.ElementTree as ET
 
 _LOGGER = logging.getLogger(__name__)
@@ -90,7 +91,8 @@ def _parse(xml: Union[str, bytes]) -> ET.Element:
 def parse_image_values(xml: Union[str, bytes]) -> Dict[str, str]:
     """Flatten an ImageChannel document into ``{path: value}``.
 
-    Only leaf elements that carry text are included.
+    Only leaf elements that carry text are included. For a repeated element
+    the first occurrence wins, like :func:`find_by_path` and the writes.
     """
     values: Dict[str, str] = {}
     _collect_values(_parse(xml), "", values)
@@ -103,7 +105,7 @@ def _collect_values(element: ET.Element, parent: str, out: Dict[str, str]) -> No
         if len(child):
             _collect_values(child, path, out)
         elif child.text and child.text.strip():
-            out[path] = child.text.strip()
+            out.setdefault(path, child.text.strip())
 
 
 def parse_image_capabilities(
@@ -139,10 +141,21 @@ def parse_image_capabilities(
     return settings
 
 
-def _walk(element: ET.Element, parent: str, out: List[ImageSetting]) -> None:
+def _walk(
+    element: ET.Element,
+    parent: str,
+    out: List[ImageSetting],
+    seen: Optional[Set[str]] = None,
+) -> None:
+    seen = set() if seen is None else seen
     for child in element:
         tag = _strip_ns(child.tag)
         path = "%s/%s" % (parent, tag) if parent else tag
+        if path in seen:
+            # A repeated element (for example a list entry): only the first is
+            # used, so that every path is reported once.
+            continue
+        seen.add(path)
 
         if path not in STRUCTURAL_PATHS:
             setting = _setting_from(child, path)
@@ -150,14 +163,16 @@ def _walk(element: ET.Element, parent: str, out: List[ImageSetting]) -> None:
                 out.append(setting)
 
         if len(child):
-            _walk(child, path, out)
+            _walk(child, path, out, seen)
 
 
 def _setting_from(child: ET.Element, path: str) -> Optional[ImageSetting]:
     default = (child.text or "").strip() or None
     opt = child.attrib.get("opt")
     if opt is not None:
-        options = [o.strip() for o in opt.split(",")]
+        options = [o.strip() for o in opt.split(",") if o.strip()]
+        if not options:
+            return None
         if {o.lower() for o in options} == {"true", "false"}:
             return ImageSetting(path, ImageSettingType.SWITCH, value=default)
         return ImageSetting(
@@ -200,7 +215,8 @@ def _merge_enabled_mode(
         elif setting.type is ImageSettingType.SELECT and any(
             o in MODE_OFF_VALUES for o in setting.options
         ):
-            selects[parent] = setting
+            # If several qualify, the first in document order is linked.
+            selects.setdefault(parent, setting)
 
     for parent, switch in switches.items():
         select = selects.get(parent)
