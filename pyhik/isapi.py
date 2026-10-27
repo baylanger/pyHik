@@ -23,7 +23,6 @@ from pyhik.image import (
     ImageSetting,
     parse_image_capabilities,
     parse_image_values,
-    parse_sub_status,
 )
 
 try:
@@ -111,6 +110,27 @@ class ISAPINotSupportedError(ISAPINotFoundError):
     ``notSupport``. Callers that only care about "not found" can keep catching
     :class:`ISAPINotFoundError`.
     """
+
+
+def parse_sub_status(content: Union[str, bytes]) -> str:
+    """Return the ``subStatusCode`` of a ``ResponseStatus`` body.
+
+    Devices describe most errors in such a body (e.g. ``notSupport``). Returns
+    an empty string if the body is not a ResponseStatus document (any
+    namespace) or has no sub status code.
+    """
+    if isinstance(content, str):
+        content = content.encode("utf-8")
+    try:
+        root = ET.fromstring(content.strip())
+    except ET.ParseError:
+        return ""
+    if root.tag.rsplit("}", 1)[-1].lower() != "responsestatus":
+        return ""
+    for child in root:
+        if child.tag.rsplit("}", 1)[-1] == "subStatusCode":
+            return (child.text or "").strip()
+    return ""
 
 
 @dataclass

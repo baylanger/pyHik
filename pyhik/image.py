@@ -32,11 +32,6 @@ _LOGGER = logging.getLogger(__name__)
 # rather than describe an adjustable setting.
 STRUCTURAL_PATHS = frozenset({"id", "enabled", "videoInputID"})
 
-# Option values meaning "off" in a mode setting. When such a setting has an
-# ``enabled`` sibling (e.g. BLC/enabled + BLC/BLCMode) the device UI shows
-# them as one control, so they are reported as one linked setting.
-MODE_OFF_VALUES = frozenset({"CLOSE", "close"})
-
 
 class ImageSettingType(Enum):
     """Kind of control an image setting maps to."""
@@ -195,6 +190,16 @@ def _setting_from(child: ET.Element, path: str) -> Optional[ImageSetting]:
     return None
 
 
+def _is_off(option: str) -> bool:
+    """Return True if a mode option means "off" ("close" in any letter case).
+
+    When such a mode has an ``enabled`` sibling (e.g. BLC/enabled +
+    BLC/BLCMode) the device UI shows them as one control, so they are
+    reported as one linked setting.
+    """
+    return option.lower() == "close"
+
+
 def _merge_enabled_mode(
     settings: List[ImageSetting], current: Dict[str, str], have_values: bool
 ) -> None:
@@ -210,10 +215,10 @@ def _merge_enabled_mode(
         parent, _, leaf = setting.path.rpartition("/")
         if not parent:
             continue
-        if setting.type is ImageSettingType.SWITCH and leaf == "enabled":
+        if setting.type is ImageSettingType.SWITCH and leaf.lower() == "enabled":
             switches[parent] = setting
         elif setting.type is ImageSettingType.SELECT and any(
-            o in MODE_OFF_VALUES for o in setting.options
+            _is_off(o) for o in setting.options
         ):
             # If several qualify, the first in document order is linked.
             selects.setdefault(parent, setting)
@@ -222,30 +227,10 @@ def _merge_enabled_mode(
         select = selects.get(parent)
         if select is None:
             continue
-        off = next(o for o in select.options if o in MODE_OFF_VALUES)
+        # Kept in the device's spelling, which is what it expects back.
+        off = next(o for o in select.options if _is_off(o))
         select.linked_enabled_path = switch.path
         select.off_value = off
         if have_values and current.get(switch.path, "").lower() != "true":
             select.value = off
         settings.remove(switch)
-
-
-def _child_text(element: ET.Element, tag: str) -> str:
-    for child in element:
-        if _strip_ns(child.tag) == tag:
-            return (child.text or "").strip()
-    return ""
-
-
-def parse_sub_status(content: Union[str, bytes]) -> str:
-    """Return the ``subStatusCode`` of a ``ResponseStatus`` body.
-
-    Devices describe most errors in such a body (e.g. ``notSupport``). Returns
-    an empty string if the body is not a ResponseStatus document or has no
-    sub status code.
-    """
-    try:
-        root = _parse(content)
-    except ET.ParseError:
-        return ""
-    return _child_text(root, "subStatusCode")

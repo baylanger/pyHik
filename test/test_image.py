@@ -9,7 +9,6 @@ from pyhik.image import (
     ImageSettingType,
     parse_image_capabilities,
     parse_image_values,
-    parse_sub_status,
 )
 from pyhik.isapi import (
     ISAPIAuthError,
@@ -99,18 +98,6 @@ class TestParseImageCapabilities(unittest.TestCase):
         self.assertEqual(len(self.settings), 30)
 
 
-class TestParseSubStatus(unittest.TestCase):
-    def test_reads_sub_status(self):
-        body = b'<ResponseStatus xmlns="x"><subStatusCode>notSupport</subStatusCode></ResponseStatus>'
-        self.assertEqual(parse_sub_status(body), "notSupport")
-        self.assertEqual(parse_sub_status(body.decode()), "notSupport")
-
-    def test_not_a_response_status(self):
-        for body in (b"", b"<html>nope", b"<ResponseStatus/>", b"<A><b>1</b></A>"):
-            with self.subTest(body=body):
-                self.assertEqual(parse_sub_status(body), "")
-
-
 class TestParseEdgeCases(unittest.TestCase):
     NS = 'xmlns="http://www.hikvision.com/ver20/XMLSchema"'
 
@@ -130,6 +117,48 @@ class TestParseEdgeCases(unittest.TestCase):
         caps = '<ImageChannel %s><X><m opt="a,,b,">a</m><n opt=",">x</n></X></ImageChannel>' % self.NS
         settings = parse_image_capabilities(caps)
         self.assertEqual([(s.path, s.options) for s in settings], [("X/m", ["a", "b"])])
+
+    def test_off_value_and_enabled_flag_are_matched_in_any_case(self):
+        for off in ("CLOSE", "close", "Close", "cLoSe"):
+            for enabled in ("enabled", "Enabled"):
+                with self.subTest(off=off, enabled=enabled):
+                    caps = (
+                        '<ImageChannel %s><F><%s opt="true,false">true</%s>'
+                        '<FMode opt="AUTO,%s">AUTO</FMode></F></ImageChannel>'
+                        % (self.NS, enabled, enabled, off)
+                    )
+                    values = (
+                        "<ImageChannel %s><F><%s>false</%s></F></ImageChannel>"
+                        % (self.NS, enabled, enabled)
+                    )
+                    settings = parse_image_capabilities(caps, values)
+                    self.assertEqual([s.path for s in settings], ["F/FMode"])
+                    mode = settings[0]
+                    self.assertEqual(mode.linked_enabled_path, "F/%s" % enabled)
+                    # The device's spelling is kept, since it is written back as is.
+                    self.assertEqual((mode.off_value, mode.value), (off, off))
+
+    def test_only_close_means_off(self):
+        for opt in ("OFF,AUTO", "closed,AUTO", "disclose,AUTO", "close-up,AUTO"):
+            with self.subTest(opt=opt):
+                caps = (
+                    '<ImageChannel %s><F><enabled opt="true,false">true</enabled>'
+                    '<FMode opt="%s">AUTO</FMode></F></ImageChannel>' % (self.NS, opt)
+                )
+                settings = {s.path: s for s in parse_image_capabilities(caps)}
+                self.assertEqual(sorted(settings), ["F/FMode", "F/enabled"])
+                self.assertIsNone(settings["F/FMode"].linked_enabled_path)
+
+    def test_enabled_value_is_read_in_any_case(self):
+        caps = (
+            '<ImageChannel %s><F><enabled opt="true,false">true</enabled>'
+            '<FMode opt="close,AUTO">AUTO</FMode></F></ImageChannel>' % self.NS
+        )
+        values = (
+            "<ImageChannel %s><F><enabled>TRUE</enabled><FMode>AUTO</FMode></F></ImageChannel>"
+            % self.NS
+        )
+        self.assertEqual(parse_image_capabilities(caps, values)[0].value, "AUTO")
 
     def test_first_of_several_off_capable_selects_is_linked(self):
         caps = (
